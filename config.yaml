@@ -1,0 +1,28 @@
+camera_index: 0
+frame_rate: 12
+downscale_width: 320
+
+detection_method: frame_diff
+
+presence:
+  min_area: 800
+  linger_seconds: 3.0
+
+wave:
+  min_magnitude: 8.0
+  min_oscillations: 3
+  history_seconds: 2.0
+
+clips:
+  presence: assets/presence.mp4
+  linger: assets/linger.mp4
+  wave: assets/wave.mp4
+
+base_image: assets/baseimg.jpg
+
+cooldowns:
+  presence: 2.0
+  linger: 8.0
+  wave: 8.0
+
+log_level: INFO
