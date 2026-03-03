@@ -10,7 +10,13 @@ class PresenceDetector:
         self.linger_seconds = cfg.get("linger_seconds", 3.0)
         self.downscale_width = downscale_width
 
-        self.prev = None
+        # Use background subtractor to detect stationary + moving objects
+        self.bg_sub = cv2.createBackgroundSubtractorMOG2(
+            history=500,
+            varThreshold=16,
+            detectShadows=True
+        )
+
         self.present = False
         self.present_since = None
         self.linger_sent = False
@@ -21,35 +27,43 @@ class PresenceDetector:
         return blur
 
     def update(self, frame) -> Optional[str]:
-        """Process frame and return 'presence' or 'linger' or None."""
-        proc = self._preprocess(frame)
+        """
+        Detect presence (stationary or moving person) using background subtraction.
+        Return 'presence' on initial detection, 'linger' after N seconds of presence.
+        """
+        gray = self._preprocess(frame)
 
-        if self.prev is None:
-            self.prev = proc
-            return None
+        # Apply background subtractor
+        mask = self.bg_sub.apply(gray)
+        
+        # Remove shadows (gray pixels in the mask)
+        _, mask = cv2.threshold(mask, 200, 255, cv2.THRESH_BINARY)
+        
+        # Morphological operations to clean up noise
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-        diff = cv2.absdiff(self.prev, proc)
-        _, th = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
-        self.prev = proc
-
-        # find contours
-        contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Find contours and compute total foreground area
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         area = sum(cv2.contourArea(c) for c in contours)
 
         now = time.time()
         if area >= self.min_area:
             if not self.present:
+                # Transition from no-presence to presence
                 self.present = True
                 self.present_since = now
                 self.linger_sent = False
                 return "presence"
             else:
-                # check linger
-                if (not self.linger_sent) and (now - (self.present_since or now) >= self.linger_seconds):
+                # Presence is ongoing; check if linger time has elapsed
+                elapsed = now - (self.present_since or now)
+                if (not self.linger_sent) and (elapsed >= self.linger_seconds):
                     self.linger_sent = True
                     return "linger"
         else:
-            # reset
+            # Presence has ended; reset state
             self.present = False
             self.present_since = None
             self.linger_sent = False
