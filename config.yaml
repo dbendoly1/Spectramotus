@@ -1,4 +1,13 @@
 
+# Optional display settings (useful on Raspberry Pi)
+# screen_w/screen_h: set your display resolution to allow accurate fullscreen 'cover' scaling
+screen_w: 1024
+screen_h: 600
+# If python-vlc is installed, MediaManager will use it by default (can be disabled)
+use_vlc: true
+# External sentinel filename to stop VLC playback (create this file to stop playback)
+stop_file: stop_media
+
 camera_index: 0
 frame_rate: 12
 downscale_width: 320

@@ -3,6 +3,14 @@ import logging
 from pathlib import Path
 from typing import Optional, Callable, Tuple
 from queue import Queue, Empty
+import os
+import time
+try:
+    import vlc
+    _HAVE_VLC = True
+except Exception:
+    vlc = None
+    _HAVE_VLC = False
 
 import cv2
 
@@ -49,6 +57,17 @@ class MediaManager:
 
         self.playback_queue = Queue(maxsize=1)
         self.stop_event = threading.Event()
+        # Optional external stop-file sentinel (checked during playback)
+        self.stop_file = cfg.get("stop_file", "stop_media")
+
+        # Initialize VLC if available and allowed in config
+        self._vlc_instance = None
+        if _HAVE_VLC and cfg.get("use_vlc", True):
+            try:
+                self._vlc_instance = vlc.Instance()
+            except Exception:
+                self.logger.exception("Failed to initialize VLC instance; falling back to cv2")
+                self._vlc_instance = None
 
         # start playback thread
         self.playback_thread = threading.Thread(target=self._playback_worker, daemon=True)
@@ -150,41 +169,93 @@ class MediaManager:
             except Exception:
                 continue
 
-            # play video
-            cap = cv2.VideoCapture(str(clip_path))
-            if not cap.isOpened():
-                self.logger.warning(f"Unable to open clip: {clip_path}")
-                continue
+            # play video - prefer VLC if available, otherwise fallback to cv2.VideoCapture
+            used_vlc = False
+            if _HAVE_VLC and self._vlc_instance is not None and self.cfg.get("use_vlc", True):
+                try:
+                    used_vlc = True
+                    self.logger.info(f"Playing clip with VLC: {clip_path}")
+                    media = self._vlc_instance.media_new(str(clip_path))
+                    player = self._vlc_instance.media_player_new()
+                    player.set_media(media)
+                    # request fullscreen if supported
+                    try:
+                        player.set_fullscreen(True)
+                    except Exception:
+                        pass
 
-            # Try to honor video FPS (helps smooth playback)
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            if fps and fps > 1:
-                frame_delay_ms = max(1, int(1000 / fps))
-            else:
-                frame_delay_ms = self.default_frame_delay_ms
+                    player.play()
 
-            self.logger.info(f"Playing clip: {clip_path} (delay={frame_delay_ms}ms)")
+                    stop_path = Path(self.stop_file)
+                    # Poll until finished, stopped by event, or stop file appears
+                    while not self.stop_event.is_set():
+                        # Stop-file check
+                        try:
+                            if stop_path.exists():
+                                try:
+                                    stop_path.unlink()
+                                except Exception:
+                                    pass
+                                self.logger.info("Stop file detected; stopping playback")
+                                break
+                        except Exception:
+                            pass
 
-            while not self.stop_event.is_set():
-                ret, frame = cap.read()
-                if not ret:
-                    break
+                        # Check VLC state
+                        try:
+                            state = player.get_state()
+                            if state in (vlc.State.Ended, vlc.State.Error, vlc.State.Stopped):
+                                break
+                        except Exception:
+                            break
 
-                if self.display_callback:
-                    self.display_callback(frame)
+                        time.sleep(0.1)
+
+                    try:
+                        player.stop()
+                    except Exception:
+                        pass
+
+                    self.logger.info(f"Finished clip: {clip_path} (VLC)")
+                except Exception:
+                    self.logger.exception("VLC playback failed; falling back to cv2")
+                    used_vlc = False
+
+            if not used_vlc:
+                cap = cv2.VideoCapture(str(clip_path))
+                if not cap.isOpened():
+                    self.logger.warning(f"Unable to open clip: {clip_path}")
+                    continue
+
+                # Try to honor video FPS (helps smooth playback)
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                if fps and fps > 1:
+                    frame_delay_ms = max(1, int(1000 / fps))
                 else:
-                    # Fullscreen cover draw
-                    self._init_display()
-                    frame2 = self._cover_resize(frame, self.screen_w, self.screen_h)
-                    cv2.imshow(self.window, frame2)
+                    frame_delay_ms = self.default_frame_delay_ms
 
-                    # Delay based on FPS; allow quitting with 'q'
-                    if cv2.waitKey(frame_delay_ms) & 0xFF == ord('q'):
-                        self.stop_event.set()
+                self.logger.info(f"Playing clip: {clip_path} (delay={frame_delay_ms}ms)")
+
+                while not self.stop_event.is_set():
+                    ret, frame = cap.read()
+                    if not ret:
                         break
 
-            cap.release()
-            self.logger.info(f"Finished clip: {clip_path}")
+                    if self.display_callback:
+                        self.display_callback(frame)
+                    else:
+                        # Fullscreen cover draw
+                        self._init_display()
+                        frame2 = self._cover_resize(frame, self.screen_w, self.screen_h)
+                        cv2.imshow(self.window, frame2)
+
+                        # Delay based on FPS; allow quitting with 'q'
+                        if cv2.waitKey(frame_delay_ms) & 0xFF == ord('q'):
+                            self.stop_event.set()
+                            break
+
+                cap.release()
+                self.logger.info(f"Finished clip: {clip_path}")
 
             # return to base image
             if self._base_image is not None:
